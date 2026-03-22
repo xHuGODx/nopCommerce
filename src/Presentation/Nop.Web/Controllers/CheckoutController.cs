@@ -1,4 +1,5 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿using System.Diagnostics;
+using Microsoft.AspNetCore.Mvc;
 using Newtonsoft.Json;
 using Nop.Core;
 using Nop.Core.Domain.Common;
@@ -7,8 +8,10 @@ using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Payments;
 using Nop.Core.Domain.Security;
 using Nop.Core.Domain.Shipping;
+using Nop.Core.Domain.Stores;
 using Nop.Core.Domain.Tax;
 using Nop.Core.Http;
+using Nop.Core.Infrastructure.Observability;
 using Nop.Services.Attributes;
 using Nop.Services.Catalog;
 using Nop.Services.Common;
@@ -125,6 +128,70 @@ public partial class CheckoutController : BasePublicController
         _rewardPointsSettings = rewardPointsSettings;
         _shippingSettings = shippingSettings;
         _taxSettings = taxSettings;
+    }
+
+    protected virtual async Task<CheckoutTelemetryContext?> CreateCheckoutTelemetryContextAsync(
+        string variant,
+        Store store,
+        IList<ShoppingCartItem> cart,
+        string paymentMethodSystemName)
+    {
+        var isRecurring = await _shoppingCartService.ShoppingCartIsRecurringAsync(cart);
+
+        return NopTelemetry.TryCreateCheckoutContext(
+            Activity.Current,
+            variant,
+            store.Id,
+            cart.Sum(item => item.Quantity),
+            paymentMethodSystemName,
+            isRecurring,
+            null,
+            out var context)
+            ? context
+            : null;
+    }
+
+    protected virtual void ApplyCheckoutTelemetry(CheckoutTelemetryContext? context)
+    {
+        if (context.HasValue)
+            NopTelemetry.ApplyCheckoutTags(Activity.Current, context.Value);
+    }
+
+    protected virtual void RecordCheckoutFailure(CheckoutTelemetryContext? context, string failureCategory)
+    {
+        if (!context.HasValue)
+            return;
+
+        NopTelemetry.MarkFailure(Activity.Current, failureCategory, CheckoutStages.ConfirmOrder);
+        NopTelemetry.RecordCheckoutBusinessFailure(CheckoutStages.ConfirmOrder, failureCategory, context.Value);
+        NopTelemetry.RecordCheckoutOutcome(CheckoutResults.Failure, context.Value);
+    }
+
+    protected virtual void RecordCheckoutSuccess(CheckoutTelemetryContext? context)
+    {
+        if (context.HasValue)
+        {
+            NopTelemetry.MarkSuccess(Activity.Current);
+            NopTelemetry.RecordCheckoutOutcome(CheckoutResults.Success, context.Value);
+        }
+    }
+
+    protected virtual string ClassifyCheckoutFailure(IEnumerable<string> errors)
+    {
+        if (errors.Any(error => error.Contains("payment", StringComparison.OrdinalIgnoreCase)))
+            return FailureCategories.PaymentDeclined;
+
+        if (errors.Any(error =>
+                error.Contains("inventory", StringComparison.OrdinalIgnoreCase)
+                || error.Contains("stock", StringComparison.OrdinalIgnoreCase)))
+            return FailureCategories.Inventory;
+
+        if (errors.Any(error =>
+                error.Contains("captcha", StringComparison.OrdinalIgnoreCase)
+                || error.Contains("checkout", StringComparison.OrdinalIgnoreCase)))
+            return FailureCategories.Validation;
+
+        return FailureCategories.Unexpected;
     }
 
     #endregion
@@ -1253,6 +1320,36 @@ public partial class CheckoutController : BasePublicController
         var customer = await _workContext.GetCurrentCustomerAsync();
         var store = await _storeContext.GetCurrentStoreAsync();
         var cart = await _shoppingCartService.GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart, store.Id);
+        var selectedPaymentMethodSystemName = await _genericAttributeService.GetAttributeAsync<string>(
+            customer,
+            NopCustomerDefaults.SelectedPaymentMethodAttribute,
+            store.Id);
+        var checkoutContext = await CreateCheckoutTelemetryContextAsync(
+            CheckoutVariants.Standard,
+            store,
+            cart,
+            selectedPaymentMethodSystemName);
+        var checkoutOutcomeRecorded = false;
+
+        void recordCheckoutFailure(string failureCategory)
+        {
+            if (checkoutOutcomeRecorded)
+                return;
+
+            RecordCheckoutFailure(checkoutContext, failureCategory);
+            checkoutOutcomeRecorded = true;
+        }
+
+        void recordCheckoutSuccess()
+        {
+            if (checkoutOutcomeRecorded)
+                return;
+
+            RecordCheckoutSuccess(checkoutContext);
+            checkoutOutcomeRecorded = true;
+        }
+
+        ApplyCheckoutTelemetry(checkoutContext);
 
         if (!cart.Any())
             return RedirectToRoute(NopRouteNames.General.CART);
@@ -1272,6 +1369,7 @@ public partial class CheckoutController : BasePublicController
         //captcha validation for guest customers
         if (isCaptchaSettingEnabled && !captchaValid)
         {
+            recordCheckoutFailure(FailureCategories.Validation);
             model.Warnings.Add(await _localizationService.GetResourceAsync("Common.WrongCaptchaMessage"));
             return View(model);
         }
@@ -1280,7 +1378,10 @@ public partial class CheckoutController : BasePublicController
         {
             //prevent 2 orders being placed within an X seconds time frame
             if (!await IsMinimumOrderPlacementIntervalValidAsync(customer))
+            {
+                recordCheckoutFailure(FailureCategories.Validation);
                 throw new Exception(await _localizationService.GetResourceAsync("Checkout.MinOrderPlacementInterval"));
+            }
 
             //place order
             var processPaymentRequest = await _orderProcessingService.GetProcessPaymentRequestAsync();
@@ -1295,8 +1396,7 @@ public partial class CheckoutController : BasePublicController
 
             processPaymentRequest.StoreId = store.Id;
             processPaymentRequest.CustomerId = customer.Id;
-            processPaymentRequest.PaymentMethodSystemName = await _genericAttributeService.GetAttributeAsync<string>(customer,
-                NopCustomerDefaults.SelectedPaymentMethodAttribute, store.Id);
+            processPaymentRequest.PaymentMethodSystemName = selectedPaymentMethodSystemName;
             await _orderProcessingService.SetProcessPaymentRequestAsync(processPaymentRequest);
             var placeOrderResult = await _orderProcessingService.PlaceOrderAsync(processPaymentRequest);
             if (placeOrderResult.Success)
@@ -1311,18 +1411,22 @@ public partial class CheckoutController : BasePublicController
 
                 if (_webHelper.IsRequestBeingRedirected || _webHelper.IsPostBeingDone)
                 {
+                    recordCheckoutSuccess();
                     //redirection or POST has been done in PostProcessPayment
                     return Empty;
                 }
 
+                recordCheckoutSuccess();
                 return RedirectToRoute(NopRouteNames.Standard.CHECKOUT_COMPLETED, new { orderId = placeOrderResult.PlacedOrder.Id });
             }
 
+            recordCheckoutFailure(ClassifyCheckoutFailure(placeOrderResult.Errors));
             foreach (var error in placeOrderResult.Errors)
                 model.Warnings.Add(error);
         }
         catch (Exception exc)
         {
+            recordCheckoutFailure(NopTelemetry.ClassifyException(CheckoutStages.ConfirmOrder, exc));
             await _logger.WarningAsync(exc.Message, exc);
             model.Warnings.Add(exc.Message);
         }
@@ -1994,6 +2098,27 @@ public partial class CheckoutController : BasePublicController
                 DisplayCaptcha = isCaptchaSettingEnabled
             };
 
+            CheckoutTelemetryContext? checkoutContext = null;
+            var checkoutOutcomeRecorded = false;
+
+            void recordCheckoutFailure(string failureCategory)
+            {
+                if (checkoutOutcomeRecorded)
+                    return;
+
+                RecordCheckoutFailure(checkoutContext, failureCategory);
+                checkoutOutcomeRecorded = true;
+            }
+
+            void recordCheckoutSuccess()
+            {
+                if (checkoutOutcomeRecorded)
+                    return;
+
+                RecordCheckoutSuccess(checkoutContext);
+                checkoutOutcomeRecorded = true;
+            }
+
             //captcha validation for guest customers
             if (!isCaptchaSettingEnabled || (isCaptchaSettingEnabled && captchaValid))
             {
@@ -2003,6 +2128,16 @@ public partial class CheckoutController : BasePublicController
 
                 var store = await _storeContext.GetCurrentStoreAsync();
                 var cart = await _shoppingCartService.GetShoppingCartAsync(customer, ShoppingCartType.ShoppingCart, store.Id);
+                var selectedPaymentMethodSystemName = await _genericAttributeService.GetAttributeAsync<string>(
+                    customer,
+                    NopCustomerDefaults.SelectedPaymentMethodAttribute,
+                    store.Id);
+                checkoutContext = await CreateCheckoutTelemetryContextAsync(
+                    CheckoutVariants.OnePage,
+                    store,
+                    cart,
+                    selectedPaymentMethodSystemName);
+                ApplyCheckoutTelemetry(checkoutContext);
 
                 if (!cart.Any())
                     throw new Exception("Your cart is empty");
@@ -2015,7 +2150,10 @@ public partial class CheckoutController : BasePublicController
 
                 //prevent 2 orders being placed within an X seconds time frame
                 if (!await IsMinimumOrderPlacementIntervalValidAsync(customer))
+                {
+                    recordCheckoutFailure(FailureCategories.Validation);
                     throw new Exception(await _localizationService.GetResourceAsync("Checkout.MinOrderPlacementInterval"));
+                }
 
                 //place order
                 var processPaymentRequest = await _orderProcessingService.GetProcessPaymentRequestAsync();
@@ -2030,8 +2168,7 @@ public partial class CheckoutController : BasePublicController
 
                 processPaymentRequest.StoreId = store.Id;
                 processPaymentRequest.CustomerId = customer.Id;
-                processPaymentRequest.PaymentMethodSystemName = await _genericAttributeService.GetAttributeAsync<string>(customer,
-                    NopCustomerDefaults.SelectedPaymentMethodAttribute, store.Id);
+                processPaymentRequest.PaymentMethodSystemName = selectedPaymentMethodSystemName;
                 await _orderProcessingService.SetProcessPaymentRequestAsync(processPaymentRequest);
                 var placeOrderResult = await _orderProcessingService.PlaceOrderAsync(processPaymentRequest);
                 if (placeOrderResult.Success)
@@ -2047,7 +2184,10 @@ public partial class CheckoutController : BasePublicController
                     if (paymentMethod == null)
                         //payment method could be null if order total is 0
                         //success
+                    {
+                        recordCheckoutSuccess();
                         return Json(new { success = 1 });
+                    }
 
                     if (paymentMethod.PaymentMethodType == PaymentMethodType.Redirection)
                     {
@@ -2055,6 +2195,7 @@ public partial class CheckoutController : BasePublicController
                         //That's why we don't process it here (we redirect a user to another page where he'll be redirected)
 
                         //redirect
+                        recordCheckoutSuccess();
                         return Json(new
                         {
                             redirect = $"{_webHelper.GetStoreLocation()}checkout/OpcCompleteRedirectionPayment"
@@ -2062,16 +2203,21 @@ public partial class CheckoutController : BasePublicController
                     }
 
                     await _paymentService.PostProcessPaymentAsync(postProcessPaymentRequest);
+                    recordCheckoutSuccess();
                     //success
                     return Json(new { success = 1 });
                 }
 
                 //error
+                recordCheckoutFailure(ClassifyCheckoutFailure(placeOrderResult.Errors));
                 foreach (var error in placeOrderResult.Errors)
                     confirmOrderModel.Warnings.Add(error);
             }
             else
+            {
+                recordCheckoutFailure(FailureCategories.Validation);
                 confirmOrderModel.Warnings.Add(await _localizationService.GetResourceAsync("Common.WrongCaptchaMessage"));
+            }
 
             return Json(new
             {
@@ -2085,6 +2231,18 @@ public partial class CheckoutController : BasePublicController
         }
         catch (Exception exc)
         {
+            if (!string.Equals(
+                    Activity.Current?.GetTagItem(TelemetryTagNames.Result)?.ToString(),
+                    CheckoutResults.Failure,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                RecordCheckoutFailure(
+                    NopTelemetry.TryGetCheckoutContext(Activity.Current, out var checkoutContext)
+                        ? checkoutContext
+                        : null,
+                    NopTelemetry.ClassifyException(CheckoutStages.ConfirmOrder, exc));
+            }
+
             await _logger.WarningAsync(exc.Message, exc, await _workContext.GetCurrentCustomerAsync());
             return Json(new { error = 1, message = exc.Message });
         }

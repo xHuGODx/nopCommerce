@@ -1,8 +1,10 @@
+using System.Diagnostics;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Nop.Core.Infrastructure;
 using Nop.Core.Infrastructure.Observability;
+using OpenTelemetry;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -39,6 +41,7 @@ public partial class ObservabilityStartup : INopStartup
                 {
                     options.RecordException = false;
                 })
+                .AddProcessor(new ServerSpanNameProcessor())
                 .AddOtlpExporter(options => options.Endpoint = endpoint))
             .WithMetrics(metrics => metrics
                 .AddMeter(NopTelemetry.MeterName)
@@ -73,5 +76,70 @@ public partial class ObservabilityStartup : INopStartup
                        ?? "http://localhost:4317";
 
         return new Uri(endpoint);
+    }
+
+    private sealed class ServerSpanNameProcessor : BaseProcessor<Activity>
+    {
+        public override void OnEnd(Activity data)
+        {
+            if (data.Kind == ActivityKind.Server && IsGenericMvcSpanName(data.DisplayName))
+            {
+                var resolvedName = BuildResolvedServerSpanName(data);
+                if (!string.IsNullOrWhiteSpace(resolvedName))
+                    data.DisplayName = resolvedName;
+            }
+
+            NopTelemetry.EnsureSpanDescription(data);
+        }
+    }
+
+    private static bool IsGenericMvcSpanName(string spanName)
+    {
+        return !string.IsNullOrWhiteSpace(spanName)
+               && spanName.Contains("{controller=", StringComparison.OrdinalIgnoreCase)
+               && spanName.Contains("{action=", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildResolvedServerSpanName(Activity activity)
+    {
+        var method = activity.GetTagItem("http.request.method") as string;
+        if (string.IsNullOrWhiteSpace(method))
+            method = "HTTP";
+
+        var routePattern = NormalizePathLikeValue(activity.GetTagItem("http.route") as string);
+        if (!string.IsNullOrWhiteSpace(routePattern) && !IsGenericMvcRoutePattern(routePattern))
+            return $"{method} {routePattern}";
+
+        var requestPath = NormalizePathLikeValue(activity.GetTagItem("url.path") as string);
+        if (!string.IsNullOrWhiteSpace(requestPath))
+            return $"{method} {requestPath}";
+
+        return method;
+    }
+
+    private static bool IsGenericMvcRoutePattern(string routePattern)
+    {
+        return routePattern.Contains("{controller=", StringComparison.OrdinalIgnoreCase)
+               && routePattern.Contains("{action=", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizePathLikeValue(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+
+        var segments = value
+            .Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(NormalizePathSegment)
+            .ToArray();
+
+        return segments.Length == 0 ? "/" : $"/{string.Join('/', segments)}";
+    }
+
+    private static string NormalizePathSegment(string segment)
+    {
+        return long.TryParse(segment, out _) || Guid.TryParse(segment, out _)
+            ? "{id}"
+            : segment;
     }
 }

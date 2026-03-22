@@ -16,6 +16,12 @@ public static class NopTelemetry
     public const string MeterName = "NopCommerce.Observability";
 
     private const string Unknown = "unknown";
+    private static readonly HashSet<string> SuppressedCheckoutRepositoryEntities = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "GenericAttribute",
+        "OrderNote",
+        "QueuedEmail"
+    };
 
     public static readonly ActivitySource ActivitySource = new(ActivitySourceName);
     public static readonly Meter Meter = new(MeterName);
@@ -38,12 +44,16 @@ public static class NopTelemetry
         var activity = ActivitySource.StartActivity(stage, ActivityKind.Internal);
         ApplyCheckoutTags(activity, context);
         activity?.SetTag(TelemetryTagNames.Stage, stage);
+        EnsureSpanDescription(activity);
         return activity;
     }
 
     public static Activity? StartRepositoryActivity(string operation, string entityName, string? dbSystem, int? batchSize = null)
     {
         var parentActivity = Activity.Current;
+        if (ShouldSuppressRepositoryActivity(parentActivity, entityName))
+            return null;
+
         var activity = ActivitySource.StartActivity($"db.repository.{operation}", ActivityKind.Client);
         ApplyCheckoutTags(activity, parentActivity);
         activity?.SetTag(TelemetryTagNames.DbSystem, NormalizeDbSystem(dbSystem));
@@ -53,7 +63,14 @@ public static class NopTelemetry
         if (batchSize.HasValue)
             activity?.SetTag(TelemetryTagNames.DbBatchSize, batchSize.Value);
 
+        EnsureSpanDescription(activity);
         return activity;
+    }
+
+    private static bool ShouldSuppressRepositoryActivity(Activity? parentActivity, string entityName)
+    {
+        return TryGetCheckoutContext(parentActivity, out _)
+               && SuppressedCheckoutRepositoryEntities.Contains(entityName);
     }
 
     public static Activity? StartEventPublishActivity(string eventName, int consumerCount)
@@ -63,6 +80,7 @@ public static class NopTelemetry
         ApplyCheckoutTags(activity, parentActivity);
         activity?.SetTag(TelemetryTagNames.EventName, eventName);
         activity?.SetTag(TelemetryTagNames.ConsumerCount, consumerCount);
+        EnsureSpanDescription(activity);
         return activity;
     }
 
@@ -73,6 +91,7 @@ public static class NopTelemetry
         ApplyCheckoutTags(activity, parentActivity);
         activity?.SetTag(TelemetryTagNames.EventName, eventName);
         activity?.SetTag(TelemetryTagNames.ConsumerName, consumerName);
+        EnsureSpanDescription(activity);
         return activity;
     }
 
@@ -296,6 +315,110 @@ public static class NopTelemetry
         return string.IsNullOrWhiteSpace(paymentMethodSystemName) ? "none" : paymentMethodSystemName.Trim().ToLowerInvariant();
     }
 
+    public static void EnsureSpanDescription(Activity? activity)
+    {
+        if (activity is null || !string.IsNullOrWhiteSpace(GetStringTag(activity, TelemetryTagNames.Description)))
+            return;
+
+        var description = DescribeSpan(activity);
+        if (!string.IsNullOrWhiteSpace(description))
+            activity.SetTag(TelemetryTagNames.Description, description);
+    }
+
+    public static string? DescribeSpan(Activity? activity)
+    {
+        if (activity is null)
+            return null;
+
+        var stage = GetStringTag(activity, TelemetryTagNames.Stage);
+        if (!string.IsNullOrWhiteSpace(stage))
+            return DescribeCheckoutStage(stage);
+
+        var dbOperation = GetStringTag(activity, TelemetryTagNames.DbOperation);
+        var dbEntityName = GetStringTag(activity, TelemetryTagNames.DbEntityName);
+        if (!string.IsNullOrWhiteSpace(dbOperation) && !string.IsNullOrWhiteSpace(dbEntityName))
+            return DescribeRepositorySpan(dbOperation, dbEntityName);
+
+        var eventName = GetStringTag(activity, TelemetryTagNames.EventName);
+        if (!string.IsNullOrWhiteSpace(eventName))
+            return DescribeEventSpan(activity.OperationName, eventName);
+
+        return activity.Kind == ActivityKind.Server
+            ? DescribeHttpServerSpan(activity)
+            : $"Represents the {activity.OperationName} operation in the current request flow.";
+    }
+
+    private static string DescribeCheckoutStage(string stage)
+    {
+        return stage switch
+        {
+            CheckoutStages.ConfirmOrder => "Validates the checkout confirmation request before the order is placed.",
+            CheckoutStages.PlaceOrder => "Coordinates the end-to-end order placement workflow after checkout confirmation.",
+            CheckoutStages.PrepareDetails => "Prepares and validates the cart, customer, totals, shipping, and payment details needed to place the order.",
+            CheckoutStages.PaymentProcess => "Processes or authorizes the selected payment method for the order being placed.",
+            CheckoutStages.PaymentPostProcess => "Runs the post-payment step required after the order is created, such as redirect or final payment handling.",
+            CheckoutStages.OrderSave => "Persists the core order record and its address snapshots to the database.",
+            CheckoutStages.OrderItemsMove => "Converts shopping cart items into order items and clears the purchased cart entries.",
+            CheckoutStages.InventoryAdjust => "Updates product inventory and records the stock movement caused by the purchase.",
+            CheckoutStages.EventPublish => "Publishes the business event emitted after the order has been placed successfully.",
+            _ => $"Represents the {stage} stage of the checkout pipeline."
+        };
+    }
+
+    private static string DescribeRepositorySpan(string operation, string entityName)
+    {
+        return (NormalizeValue(operation), entityName) switch
+        {
+            ("insert", "Address") => "Persists a billing or shipping address snapshot that will be attached to the order.",
+            ("insert", "Order") => "Creates the core order record in the database.",
+            ("update", "Order") => "Updates the persisted order after identifiers, totals, or status fields are finalized.",
+            ("insert", "OrderItem") => "Creates an order item row for a purchased cart item.",
+            ("update", "Product") => "Updates the product record after checkout changed inventory-related values.",
+            ("update", "Customer") => "Updates customer state affected by checkout, such as last activity or checkout-related metadata.",
+            ("insert", "StockQuantityHistory") => "Records an audit entry for the stock adjustment caused by this purchase.",
+            ("bulk_delete", "ShoppingCartItem") => "Removes purchased items from the shopping cart after they are converted into order items.",
+            _ => $"{ToSentenceVerb(operation)} the {entityName} entity through the repository layer as part of this request."
+        };
+    }
+
+    private static string DescribeEventSpan(string operationName, string eventName)
+    {
+        return operationName switch
+        {
+            "checkout.event.publish" => $"Publishes the {eventName} business event as part of the checkout completion flow.",
+            "nop.event.publish" => $"Publishes the {eventName} domain event to in-process nopCommerce consumers.",
+            "nop.event.consumer" => $"Executes an in-process consumer for the {eventName} domain event.",
+            _ => $"Represents event-processing work for {eventName}."
+        };
+    }
+
+    private static string DescribeHttpServerSpan(Activity activity)
+    {
+        var method = GetStringTag(activity, "http.request.method") ?? "HTTP";
+        var path = GetStringTag(activity, "url.path") ?? "/";
+
+        if (path.Contains("/checkout/OpcConfirmOrder", StringComparison.OrdinalIgnoreCase))
+            return $"Incoming {method} request that confirms the order in the one-page checkout flow.";
+
+        if (path.Contains("/checkout/confirm", StringComparison.OrdinalIgnoreCase))
+            return $"Incoming {method} request that confirms the order in the standard checkout flow.";
+
+        return $"Incoming {method} request for {path}.";
+    }
+
+    private static string ToSentenceVerb(string operation)
+    {
+        return NormalizeValue(operation) switch
+        {
+            "insert" => "Creates",
+            "update" => "Updates",
+            "delete" => "Deletes",
+            "bulk_delete" => "Deletes",
+            "delete_by_predicate" => "Deletes",
+            _ => "Performs"
+        };
+    }
+
     private static TagList CreateCheckoutMetricTags(CheckoutTelemetryContext context)
     {
         var tags = new TagList
@@ -459,6 +582,7 @@ public static class TelemetryTagNames
     public const string DbEntityName = "db.nop.entity";
     public const string DbOperation = "db.operation";
     public const string DbSystem = "db.system";
+    public const string Description = "description";
     public const string ErrorType = "error.type";
     public const string EventName = "event.name";
     public const string FailureCategory = "failure.category";

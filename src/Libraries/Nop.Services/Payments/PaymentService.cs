@@ -1,6 +1,8 @@
-﻿using Nop.Core;
+﻿using System.Diagnostics;
+using Nop.Core;
 using Nop.Core.Domain.Orders;
 using Nop.Core.Domain.Payments;
+using Nop.Core.Infrastructure.Observability;
 using Nop.Services.Catalog;
 using Nop.Services.Customers;
 
@@ -50,28 +52,50 @@ public partial class PaymentService : IPaymentService
     /// </returns>
     public virtual async Task<ProcessPaymentResult> ProcessPaymentAsync(ProcessPaymentRequest processPaymentRequest)
     {
-        if (processPaymentRequest.OrderTotal == decimal.Zero)
+        async Task<ProcessPaymentResult> processPaymentAsync()
         {
-            var result = new ProcessPaymentResult
+            if (processPaymentRequest.OrderTotal == decimal.Zero)
             {
-                NewPaymentStatus = PaymentStatus.Paid
-            };
-            return result;
+                var result = new ProcessPaymentResult
+                {
+                    NewPaymentStatus = PaymentStatus.Paid
+                };
+                return result;
+            }
+
+            //We should strip out any white space or dash in the CC number entered.
+            if (!string.IsNullOrWhiteSpace(processPaymentRequest.CreditCardNumber))
+            {
+                processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace(" ", string.Empty);
+                processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace("-", string.Empty);
+            }
+
+            var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
+            var paymentMethod = await _paymentPluginManager
+                                    .LoadPluginBySystemNameAsync(processPaymentRequest.PaymentMethodSystemName, customer, processPaymentRequest.StoreId)
+                                ?? throw new NopException("Payment method couldn't be loaded");
+
+            return await paymentMethod.ProcessPaymentAsync(processPaymentRequest);
         }
 
-        //We should strip out any white space or dash in the CC number entered.
-        if (!string.IsNullOrWhiteSpace(processPaymentRequest.CreditCardNumber))
-        {
-            processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace(" ", string.Empty);
-            processPaymentRequest.CreditCardNumber = processPaymentRequest.CreditCardNumber.Replace("-", string.Empty);
-        }
+        if (!NopTelemetry.TryCreateCheckoutContext(
+                Activity.Current,
+                null,
+                processPaymentRequest.StoreId,
+                null,
+                processPaymentRequest.PaymentMethodSystemName,
+                null,
+                processPaymentRequest.OrderTotal,
+                out var checkoutContext))
+            return await processPaymentAsync();
 
-        var customer = await _customerService.GetCustomerByIdAsync(processPaymentRequest.CustomerId);
-        var paymentMethod = await _paymentPluginManager
-                                .LoadPluginBySystemNameAsync(processPaymentRequest.PaymentMethodSystemName, customer, processPaymentRequest.StoreId)
-                            ?? throw new NopException("Payment method couldn't be loaded");
-
-        return await paymentMethod.ProcessPaymentAsync(processPaymentRequest);
+        return await NopTelemetry.RunCheckoutStageAsync(
+            CheckoutStages.PaymentProcess,
+            checkoutContext,
+            processPaymentAsync,
+            result => result.Success
+                ? CheckoutStageResult.SuccessResult()
+                : CheckoutStageResult.FailureResult(FailureCategories.PaymentDeclined));
     }
 
     /// <summary>
@@ -81,16 +105,35 @@ public partial class PaymentService : IPaymentService
     /// <returns>A task that represents the asynchronous operation</returns>
     public virtual async Task PostProcessPaymentAsync(PostProcessPaymentRequest postProcessPaymentRequest)
     {
-        //already paid or order.OrderTotal == decimal.Zero
-        if (postProcessPaymentRequest.Order.PaymentStatus == PaymentStatus.Paid)
+        async Task postProcessPaymentAsync()
+        {
+            //already paid or order.OrderTotal == decimal.Zero
+            if (postProcessPaymentRequest.Order.PaymentStatus == PaymentStatus.Paid)
+                return;
+
+            var customer = await _customerService.GetCustomerByIdAsync(postProcessPaymentRequest.Order.CustomerId);
+            var paymentMethod = await _paymentPluginManager
+                                    .LoadPluginBySystemNameAsync(postProcessPaymentRequest.Order.PaymentMethodSystemName, customer, postProcessPaymentRequest.Order.StoreId)
+                                ?? throw new NopException("Payment method couldn't be loaded");
+
+            await paymentMethod.PostProcessPaymentAsync(postProcessPaymentRequest);
+        }
+
+        if (!NopTelemetry.TryCreateCheckoutContext(
+                Activity.Current,
+                null,
+                postProcessPaymentRequest.Order.StoreId,
+                null,
+                postProcessPaymentRequest.Order.PaymentMethodSystemName,
+                null,
+                postProcessPaymentRequest.Order.OrderTotal,
+                out var checkoutContext))
+        {
+            await postProcessPaymentAsync();
             return;
+        }
 
-        var customer = await _customerService.GetCustomerByIdAsync(postProcessPaymentRequest.Order.CustomerId);
-        var paymentMethod = await _paymentPluginManager
-                                .LoadPluginBySystemNameAsync(postProcessPaymentRequest.Order.PaymentMethodSystemName, customer, postProcessPaymentRequest.Order.StoreId)
-                            ?? throw new NopException("Payment method couldn't be loaded");
-
-        await paymentMethod.PostProcessPaymentAsync(postProcessPaymentRequest);
+        await NopTelemetry.RunCheckoutStageAsync(CheckoutStages.PaymentPostProcess, checkoutContext, postProcessPaymentAsync);
     }
 
     /// <summary>

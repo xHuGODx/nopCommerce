@@ -5,6 +5,7 @@ using Nop.Core.Caching;
 using Nop.Core.Configuration;
 using Nop.Core.Domain.Common;
 using Nop.Core.Events;
+using Nop.Core.Infrastructure.Observability;
 
 namespace Nop.Data;
 
@@ -342,7 +343,18 @@ public partial class EntityRepository<TEntity> : IRepository<TEntity> where TEnt
     {
         ArgumentNullException.ThrowIfNull(entity);
 
-        await _dataProvider.InsertEntityAsync(entity);
+        using var activity = NopTelemetry.StartRepositoryActivity("insert", typeof(TEntity).Name, _dataProvider.ConfigurationName);
+
+        try
+        {
+            await _dataProvider.InsertEntityAsync(entity);
+            NopTelemetry.MarkSuccess(activity);
+        }
+        catch (Exception exception)
+        {
+            NopTelemetry.MarkFailure(activity, FailureCategories.Db, errorType: exception.GetType().Name);
+            throw;
+        }
 
         //event notification
         if (publishEvent)
@@ -359,9 +371,20 @@ public partial class EntityRepository<TEntity> : IRepository<TEntity> where TEnt
     {
         ArgumentNullException.ThrowIfNull(entities);
 
-        using var transaction = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
-        await _dataProvider.BulkInsertEntitiesAsync(entities);
-        transaction.Complete();
+        using var activity = NopTelemetry.StartRepositoryActivity("bulk_insert", typeof(TEntity).Name, _dataProvider.ConfigurationName, entities.Count);
+
+        try
+        {
+            using var transaction = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
+            await _dataProvider.BulkInsertEntitiesAsync(entities);
+            transaction.Complete();
+            NopTelemetry.MarkSuccess(activity);
+        }
+        catch (Exception exception)
+        {
+            NopTelemetry.MarkFailure(activity, FailureCategories.Db, errorType: exception.GetType().Name);
+            throw;
+        }
 
         if (!publishEvent)
             return;
@@ -395,7 +418,18 @@ public partial class EntityRepository<TEntity> : IRepository<TEntity> where TEnt
     {
         ArgumentNullException.ThrowIfNull(entity);
 
-        await _dataProvider.UpdateEntityAsync(entity);
+        using var activity = NopTelemetry.StartRepositoryActivity("update", typeof(TEntity).Name, _dataProvider.ConfigurationName);
+
+        try
+        {
+            await _dataProvider.UpdateEntityAsync(entity);
+            NopTelemetry.MarkSuccess(activity);
+        }
+        catch (Exception exception)
+        {
+            NopTelemetry.MarkFailure(activity, FailureCategories.Db, errorType: exception.GetType().Name);
+            throw;
+        }
 
         //event notification
         if (publishEvent)
@@ -415,7 +449,18 @@ public partial class EntityRepository<TEntity> : IRepository<TEntity> where TEnt
         if (!entities.Any())
             return;
 
-        await _dataProvider.UpdateEntitiesAsync(entities);
+        using var activity = NopTelemetry.StartRepositoryActivity("bulk_update", typeof(TEntity).Name, _dataProvider.ConfigurationName, entities.Count);
+
+        try
+        {
+            await _dataProvider.UpdateEntitiesAsync(entities);
+            NopTelemetry.MarkSuccess(activity);
+        }
+        catch (Exception exception)
+        {
+            NopTelemetry.MarkFailure(activity, FailureCategories.Db, errorType: exception.GetType().Name);
+            throw;
+        }
 
         //event notification
         if (!publishEvent)
@@ -435,16 +480,28 @@ public partial class EntityRepository<TEntity> : IRepository<TEntity> where TEnt
     {
         ArgumentNullException.ThrowIfNull(entity);
 
-        switch (entity)
-        {
-            case ISoftDeletedEntity softDeletedEntity:
-                softDeletedEntity.Deleted = true;
-                await _dataProvider.UpdateEntityAsync(entity);
-                break;
+        using var activity = NopTelemetry.StartRepositoryActivity("delete", typeof(TEntity).Name, _dataProvider.ConfigurationName);
 
-            default:
-                await _dataProvider.DeleteEntityAsync(entity);
-                break;
+        try
+        {
+            switch (entity)
+            {
+                case ISoftDeletedEntity softDeletedEntity:
+                    softDeletedEntity.Deleted = true;
+                    await _dataProvider.UpdateEntityAsync(entity);
+                    break;
+
+                default:
+                    await _dataProvider.DeleteEntityAsync(entity);
+                    break;
+            }
+
+            NopTelemetry.MarkSuccess(activity);
+        }
+        catch (Exception exception)
+        {
+            NopTelemetry.MarkFailure(activity, FailureCategories.Db, errorType: exception.GetType().Name);
+            throw;
         }
 
         //event notification
@@ -465,19 +522,30 @@ public partial class EntityRepository<TEntity> : IRepository<TEntity> where TEnt
         if (!entities.Any())
             return;
 
-        using var transaction = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
+        using var activity = NopTelemetry.StartRepositoryActivity("bulk_delete", typeof(TEntity).Name, _dataProvider.ConfigurationName, entities.Count);
 
-        if (typeof(TEntity).GetInterface(nameof(ISoftDeletedEntity)) == null)
-            await _dataProvider.BulkDeleteEntitiesAsync(entities);
-        else
+        try
         {
-            foreach (var entity in entities)
-                ((ISoftDeletedEntity)entity).Deleted = true;
+            using var transaction = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
 
-            await _dataProvider.UpdateEntitiesAsync(entities);
+            if (typeof(TEntity).GetInterface(nameof(ISoftDeletedEntity)) == null)
+                await _dataProvider.BulkDeleteEntitiesAsync(entities);
+            else
+            {
+                foreach (var entity in entities)
+                    ((ISoftDeletedEntity)entity).Deleted = true;
+
+                await _dataProvider.UpdateEntitiesAsync(entities);
+            }
+
+            transaction.Complete();
+            NopTelemetry.MarkSuccess(activity);
         }
-
-        transaction.Complete();
+        catch (Exception exception)
+        {
+            NopTelemetry.MarkFailure(activity, FailureCategories.Db, errorType: exception.GetType().Name);
+            throw;
+        }
 
         //event notification
         if (!publishEvent)
@@ -499,11 +567,23 @@ public partial class EntityRepository<TEntity> : IRepository<TEntity> where TEnt
     {
         ArgumentNullException.ThrowIfNull(predicate);
 
-        using var transaction = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
-        var countDeletedRecords = await _dataProvider.BulkDeleteEntitiesAsync(predicate);
-        transaction.Complete();
+        using var activity = NopTelemetry.StartRepositoryActivity("delete_by_predicate", typeof(TEntity).Name, _dataProvider.ConfigurationName);
 
-        return countDeletedRecords;
+        try
+        {
+            using var transaction = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
+            var countDeletedRecords = await _dataProvider.BulkDeleteEntitiesAsync(predicate);
+            transaction.Complete();
+            activity?.SetTag(TelemetryTagNames.DbBatchSize, countDeletedRecords);
+            NopTelemetry.MarkSuccess(activity);
+
+            return countDeletedRecords;
+        }
+        catch (Exception exception)
+        {
+            NopTelemetry.MarkFailure(activity, FailureCategories.Db, errorType: exception.GetType().Name);
+            throw;
+        }
     }
 
     /// <summary>
@@ -513,7 +593,19 @@ public partial class EntityRepository<TEntity> : IRepository<TEntity> where TEnt
     /// <returns>A task that represents the asynchronous operation</returns>
     public virtual async Task TruncateAsync(bool resetIdentity = false)
     {
-        await _dataProvider.TruncateAsync<TEntity>(resetIdentity);
+        using var activity = NopTelemetry.StartRepositoryActivity("truncate", typeof(TEntity).Name, _dataProvider.ConfigurationName);
+        activity?.SetTag("db.reset_identity", resetIdentity);
+
+        try
+        {
+            await _dataProvider.TruncateAsync<TEntity>(resetIdentity);
+            NopTelemetry.MarkSuccess(activity);
+        }
+        catch (Exception exception)
+        {
+            NopTelemetry.MarkFailure(activity, FailureCategories.Db, errorType: exception.GetType().Name);
+            throw;
+        }
     }
 
     #endregion
