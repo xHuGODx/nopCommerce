@@ -6,12 +6,11 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 docker run --rm --network host \
   -v "$PROJECT_ROOT:/work" \
-  grafana/k6 run /work/loadtests/checkout-baseline.js \
+  grafana/k6 run /work/loadtests/checkout-failure-missing-payment-info.js \
   -e BASE_URL=http://localhost \
   -e PRODUCT_PATH=/htc-smartphone \
-  -e PAYMENT_METHOD=Payments.CheckMoneyOrder \
-  -e VUS=5 \
-  -e ITERATIONS=10 \
-  -e PAUSE_SECONDS=4 \
+  -e VUS=1 \
+  -e ITERATIONS=1 \
+  -e PAUSE_SECONDS=0 \
   -e MAX_DURATION=15m \
   "$@"
