@@ -170,6 +170,9 @@ public static class NopTelemetry
 
         try
         {
+            await ApplyInjectedDelayAsync(stage);
+            MaybeThrowInjectedFailure(stage);
+
             var value = await operation();
             var result = evaluateResult?.Invoke(value) ?? CheckoutStageResult.SuccessResult();
 
@@ -201,6 +204,54 @@ public static class NopTelemetry
                 await operation();
                 return null;
             });
+    }
+
+    private static async Task ApplyInjectedDelayAsync(string stage)
+    {
+        var settings = FaultInjectionSettings.Load();
+        if (!settings.Enabled
+            || settings.DelayMilliseconds <= 0
+            || !string.Equals(settings.DelayStage, stage, StringComparison.OrdinalIgnoreCase)
+            || !ShouldInject(settings.DelayPercent))
+        {
+            return;
+        }
+
+        TagInjectedFault(Activity.Current, stage, FaultTypes.Delay, settings.DelayPercent, settings.DelayMilliseconds);
+        await Task.Delay(settings.DelayMilliseconds);
+    }
+
+    private static void MaybeThrowInjectedFailure(string stage)
+    {
+        var settings = FaultInjectionSettings.Load();
+        if (!settings.Enabled
+            || !string.Equals(settings.FailureStage, stage, StringComparison.OrdinalIgnoreCase)
+            || !ShouldInject(settings.FailurePercent))
+        {
+            return;
+        }
+
+        TagInjectedFault(Activity.Current, stage, FaultTypes.Failure, settings.FailurePercent);
+        throw new InvalidOperationException($"Injected checkout failure at stage '{stage}'.");
+    }
+
+    private static bool ShouldInject(int percent)
+    {
+        return percent > 0 && Random.Shared.Next(1, 101) <= percent;
+    }
+
+    private static void TagInjectedFault(Activity? activity, string stage, string faultType, int percent, int? delayMilliseconds = null)
+    {
+        if (activity is null)
+            return;
+
+        activity.SetTag(TelemetryTagNames.FaultInjected, true);
+        activity.SetTag(TelemetryTagNames.FaultType, faultType);
+        activity.SetTag(TelemetryTagNames.FaultStage, stage);
+        activity.SetTag(TelemetryTagNames.FaultPercent, percent);
+
+        if (delayMilliseconds.HasValue)
+            activity.SetTag(TelemetryTagNames.FaultDelayMilliseconds, delayMilliseconds.Value);
     }
 
     public static void RecordCheckoutStageDuration(string stage, CheckoutTelemetryContext context, TimeSpan duration, string result)
@@ -516,6 +567,59 @@ public static class NopTelemetry
     }
 }
 
+internal static class FaultInjectionSettings
+{
+    private const string EnabledVariable = "FAULT_INJECTION_ENABLED";
+    private const string FailureStageVariable = "FAULT_INJECTION_FAIL_STAGE";
+    private const string FailurePercentVariable = "FAULT_INJECTION_FAIL_PERCENT";
+    private const string DelayStageVariable = "FAULT_INJECTION_DELAY_STAGE";
+    private const string DelayPercentVariable = "FAULT_INJECTION_DELAY_PERCENT";
+    private const string DelayMillisecondsVariable = "FAULT_INJECTION_DELAY_MS";
+
+    public static CheckoutFaultInjectionSettings Load()
+    {
+        return new CheckoutFaultInjectionSettings(
+            Enabled: ParseBoolean(EnabledVariable),
+            FailureStage: NormalizeStage(Environment.GetEnvironmentVariable(FailureStageVariable)),
+            FailurePercent: ParsePercent(FailurePercentVariable),
+            DelayStage: NormalizeStage(Environment.GetEnvironmentVariable(DelayStageVariable)),
+            DelayPercent: ParsePercent(DelayPercentVariable),
+            DelayMilliseconds: ParseNonNegativeInt(DelayMillisecondsVariable));
+    }
+
+    private static bool ParseBoolean(string variableName)
+    {
+        return bool.TryParse(Environment.GetEnvironmentVariable(variableName), out var value) && value;
+    }
+
+    private static int ParsePercent(string variableName)
+    {
+        return int.TryParse(Environment.GetEnvironmentVariable(variableName), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+            ? Math.Clamp(value, 0, 100)
+            : 0;
+    }
+
+    private static int ParseNonNegativeInt(string variableName)
+    {
+        return int.TryParse(Environment.GetEnvironmentVariable(variableName), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)
+            ? Math.Max(0, value)
+            : 0;
+    }
+
+    private static string NormalizeStage(string? stage)
+    {
+        return string.IsNullOrWhiteSpace(stage) ? string.Empty : stage.Trim().ToLowerInvariant();
+    }
+}
+
+internal readonly record struct CheckoutFaultInjectionSettings(
+    bool Enabled,
+    string FailureStage,
+    int FailurePercent,
+    string DelayStage,
+    int DelayPercent,
+    int DelayMilliseconds);
+
 public readonly record struct CheckoutTelemetryContext(
     string Variant,
     int StoreId,
@@ -572,6 +676,12 @@ public static class FailureCategories
     public const string Unexpected = "unexpected";
 }
 
+public static class FaultTypes
+{
+    public const string Delay = "delay";
+    public const string Failure = "failure";
+}
+
 public static class TelemetryTagNames
 {
     public const string CartItemsCount = "cart.items.count";
@@ -585,6 +695,11 @@ public static class TelemetryTagNames
     public const string Description = "description";
     public const string ErrorType = "error.type";
     public const string EventName = "event.name";
+    public const string FaultDelayMilliseconds = "fault.delay.ms";
+    public const string FaultInjected = "fault.injected";
+    public const string FaultPercent = "fault.percent";
+    public const string FaultStage = "fault.stage";
+    public const string FaultType = "fault.type";
     public const string FailureCategory = "failure.category";
     public const string FailureStage = "failure.stage";
     public const string IsRecurring = "is_recurring";

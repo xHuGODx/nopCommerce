@@ -2161,7 +2161,10 @@ public partial class CheckoutController : BasePublicController
                 {
                     //Check whether payment workflow is required
                     if (await _orderProcessingService.IsPaymentWorkflowRequiredAsync(cart))
+                    {
+                        recordCheckoutFailure(FailureCategories.Validation);
                         throw new Exception("Payment information is not entered");
+                    }
 
                     processPaymentRequest = new ProcessPaymentRequest();
                 }
