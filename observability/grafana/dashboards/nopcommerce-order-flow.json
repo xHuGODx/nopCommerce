@@ -120,6 +120,7 @@
             "uid": "prometheus"
           },
           "expr": "sum by (stage, failure_category) (increase(checkout_business_failures_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"}[$__range]))",
+          "instant": true,
           "legendFormat": "{{stage}} / {{failure_category}}",
           "refId": "A"
         }
@@ -163,6 +164,7 @@
             "uid": "prometheus"
           },
           "expr": "sum by (result) (increase(checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"}[$__range]))",
+          "instant": true,
           "legendFormat": "{{result}}",
           "refId": "A"
         }
@@ -230,52 +232,6 @@
               }
             ]
           }
-        },
-        "overrides": []
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "center",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "textMode": "value_and_name"
-      },
-      "pluginVersion": "11.0.0"
-    },
-    {
-      "type": "stat",
-      "title": "Most Recent Outcome Volume",
-      "description": "Latest request volume in the selected time window.",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 20
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "expr": "sum(increase(checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"}[$__range]))",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0
         },
         "overrides": []
       },
