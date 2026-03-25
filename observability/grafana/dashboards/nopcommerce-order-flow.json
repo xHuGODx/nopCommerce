@@ -77,6 +77,7 @@
             "uid": "prometheus"
           },
           "expr": "histogram_quantile(0.95, sum by (le, stage) (rate(checkout_stage_duration_seconds_bucket{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"}[$__rate_interval])))",
+          "instant": false,
           "legendFormat": "{{stage}}",
           "refId": "A"
         }
@@ -119,7 +120,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (stage, failure_category) (increase(checkout_business_failures_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"}[$__range]))",
+          "expr": "sum by (stage, failure_category) (((checkout_business_failures_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\",stage!=\"checkout.place_order\"} unless checkout_business_failures_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\",stage=\"checkout.confirm_order\",failure_category!=\"validation\"}) * on (service_instance_id, checkout_variant, payment_method_system_name, is_recurring, stage, failure_category) group_left() (topk by (checkout_variant, payment_method_system_name, is_recurring, stage, failure_category) (1, timestamp((checkout_business_failures_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\",stage!=\"checkout.place_order\"} unless checkout_business_failures_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\",stage=\"checkout.confirm_order\",failure_category!=\"validation\"}))) > bool 0)))",
           "instant": true,
           "legendFormat": "{{stage}} / {{failure_category}}",
           "refId": "A"
@@ -163,7 +164,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum by (result) (increase(checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"}[$__range]))",
+          "expr": "sum by (result) (checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"} * on (service_instance_id, checkout_variant, payment_method_system_name, is_recurring, result) group_left() (topk by (checkout_variant, payment_method_system_name, is_recurring, result) (1, timestamp(checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"})) > bool 0))",
           "instant": true,
           "legendFormat": "{{result}}",
           "refId": "A"
@@ -207,7 +208,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "100 * sum(rate(checkout_outcomes_total{result=\"failure\",checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"}[$__rate_interval])) / clamp_min(sum(rate(checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"}[$__rate_interval])), 0.000001)",
+          "expr": "100 * sum(checkout_outcomes_total{result=\"failure\",checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"} * on (service_instance_id, checkout_variant, payment_method_system_name, is_recurring, result) group_left() (topk by (checkout_variant, payment_method_system_name, is_recurring, result) (1, timestamp(checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"})) > bool 0)) / clamp_min(sum(checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"} * on (service_instance_id, checkout_variant, payment_method_system_name, is_recurring, result) group_left() (topk by (checkout_variant, payment_method_system_name, is_recurring, result) (1, timestamp(checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"})) > bool 0)), 0.000001)",
+          "instant": true,
           "refId": "A"
         }
       ],
