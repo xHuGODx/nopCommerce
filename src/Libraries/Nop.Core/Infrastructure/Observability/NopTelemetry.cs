@@ -16,6 +16,7 @@ public static class NopTelemetry
     public const string MeterName = "NopCommerce.Observability";
 
     private const string Unknown = "unknown";
+    private const string BusinessFailureRecordedExceptionDataKey = "NopTelemetry.BusinessFailureRecorded";
     private static readonly HashSet<string> SuppressedCheckoutRepositoryEntities = new(StringComparer.OrdinalIgnoreCase)
     {
         "GenericAttribute",
@@ -146,7 +147,8 @@ public static class NopTelemetry
         CheckoutTelemetryContext context,
         TimeSpan duration,
         CheckoutStageResult result,
-        string? errorType = null)
+        string? errorType = null,
+        bool recordBusinessFailure = true)
     {
         if (result.Success)
             MarkSuccess(activity);
@@ -155,7 +157,7 @@ public static class NopTelemetry
 
         RecordCheckoutStageDuration(stage, context, duration, result.Result);
 
-        if (!result.Success)
+        if (!result.Success && recordBusinessFailure)
             RecordCheckoutBusinessFailure(stage, result.FailureCategory, context);
     }
 
@@ -182,16 +184,39 @@ public static class NopTelemetry
         }
         catch (Exception exception)
         {
+            var failureCategory = ClassifyException(stage, exception);
             FinalizeCheckoutStage(
                 activity,
                 stage,
                 context,
                 stopwatch.Elapsed,
-                CheckoutStageResult.FailureResult(ClassifyException(stage, exception)),
-                exception.GetType().Name);
+                CheckoutStageResult.FailureResult(failureCategory),
+                exception.GetType().Name,
+                recordBusinessFailure: false);
+
+            if (TryMarkBusinessFailureRecorded(exception))
+                RecordCheckoutBusinessFailure(stage, failureCategory, context);
 
             throw;
         }
+    }
+
+    public static bool HasRecordedBusinessFailure(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+
+        return exception.Data.Contains(BusinessFailureRecordedExceptionDataKey);
+    }
+
+    public static bool TryMarkBusinessFailureRecorded(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+
+        if (exception.Data.Contains(BusinessFailureRecordedExceptionDataKey))
+            return false;
+
+        exception.Data[BusinessFailureRecordedExceptionDataKey] = true;
+        return true;
     }
 
     public static async Task RunCheckoutStageAsync(string stage, CheckoutTelemetryContext context, Func<Task> operation)

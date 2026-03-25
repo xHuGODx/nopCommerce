@@ -157,13 +157,19 @@ public partial class CheckoutController : BasePublicController
             NopTelemetry.ApplyCheckoutTags(Activity.Current, context.Value);
     }
 
-    protected virtual void RecordCheckoutFailure(CheckoutTelemetryContext? context, string failureCategory)
+    protected virtual void RecordCheckoutFailure(
+        CheckoutTelemetryContext? context,
+        string failureCategory,
+        bool recordBusinessFailure = true)
     {
         if (!context.HasValue)
             return;
 
         NopTelemetry.MarkFailure(Activity.Current, failureCategory, CheckoutStages.ConfirmOrder);
-        NopTelemetry.RecordCheckoutBusinessFailure(CheckoutStages.ConfirmOrder, failureCategory, context.Value);
+
+        if (recordBusinessFailure)
+            NopTelemetry.RecordCheckoutBusinessFailure(CheckoutStages.ConfirmOrder, failureCategory, context.Value);
+
         NopTelemetry.RecordCheckoutOutcome(CheckoutResults.Failure, context.Value);
     }
 
@@ -2243,7 +2249,8 @@ public partial class CheckoutController : BasePublicController
                     NopTelemetry.TryGetCheckoutContext(Activity.Current, out var checkoutContext)
                         ? checkoutContext
                         : null,
-                    NopTelemetry.ClassifyException(CheckoutStages.ConfirmOrder, exc));
+                    NopTelemetry.ClassifyException(CheckoutStages.ConfirmOrder, exc),
+                    recordBusinessFailure: !NopTelemetry.HasRecordedBusinessFailure(exc));
             }
 
             await _logger.WarningAsync(exc.Message, exc, await _workContext.GetCurrentCustomerAsync());
