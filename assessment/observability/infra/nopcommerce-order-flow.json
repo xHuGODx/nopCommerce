@@ -1,0 +1,328 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "type": "text",
+      "title": "Order Story",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "This dashboard follows a customer from checkout confirmation into order creation, payment, event publishing, inventory updates, and repository writes. Use the Jaeger table below to open a trace for a single checkout, then correlate the custom metrics to see whether slowness is in payment, order persistence, or inventory."
+      },
+      "pluginVersion": "11.0.0"
+    },
+    {
+      "type": "table",
+      "title": "Checkout Traces (Jaeger)",
+      "description": "Searches the shared checkout business span for both standard and one-page checkout flows. Click a TraceID cell to open the detailed Jaeger trace.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "jaeger",
+        "uid": "jaeger"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "jaeger",
+            "uid": "jaeger"
+          },
+          "limit": 20,
+          "operation": "checkout.place_order",
+          "queryType": "search",
+          "refId": "A",
+          "service": "nopcommerce-web"
+        }
+      ],
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true
+      },
+      "pluginVersion": "11.0.0"
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkout Stage P95",
+      "description": "P95 latency by checkout stage. Payment and order save problems usually show up here first.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, stage) (rate(checkout_stage_duration_seconds_bucket{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"}[$__rate_interval])))",
+          "instant": false,
+          "legendFormat": "{{stage}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "pluginVersion": "11.0.0"
+    },
+    {
+      "type": "barchart",
+      "title": "Business Failures By Stage",
+      "description": "Business failures that did not necessarily become HTTP 5xx responses.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (stage, failure_category) (((checkout_business_failures_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\",stage!=\"checkout.place_order\"} unless checkout_business_failures_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\",stage=\"checkout.confirm_order\",failure_category!=\"validation\"}) * on (service_instance_id, checkout_variant, payment_method_system_name, is_recurring, stage, failure_category) group_left() (topk by (checkout_variant, payment_method_system_name, is_recurring, stage, failure_category) (1, timestamp((checkout_business_failures_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\",stage!=\"checkout.place_order\"} unless checkout_business_failures_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\",stage=\"checkout.confirm_order\",failure_category!=\"validation\"}))) > bool 0)))",
+          "instant": true,
+          "legendFormat": "{{stage}} / {{failure_category}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "pluginVersion": "11.0.0"
+    },
+    {
+      "type": "barchart",
+      "title": "Checkout Outcomes",
+      "description": "Success versus failure outcomes for checkout confirmation requests.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "sum by (result) (checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"} * on (service_instance_id, checkout_variant, payment_method_system_name, is_recurring, result) group_left() (topk by (checkout_variant, payment_method_system_name, is_recurring, result) (1, timestamp(checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"})) > bool 0))",
+          "instant": true,
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "pluginVersion": "11.0.0"
+    },
+    {
+      "type": "stat",
+      "title": "Checkout Error Rate",
+      "description": "Failure rate derived from checkout outcomes, not from HTTP status alone.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "100 * sum(checkout_outcomes_total{result=\"failure\",checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"} * on (service_instance_id, checkout_variant, payment_method_system_name, is_recurring, result) group_left() (topk by (checkout_variant, payment_method_system_name, is_recurring, result) (1, timestamp(checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"})) > bool 0)) / clamp_min(sum(checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"} * on (service_instance_id, checkout_variant, payment_method_system_name, is_recurring, result) group_left() (topk by (checkout_variant, payment_method_system_name, is_recurring, result) (1, timestamp(checkout_outcomes_total{checkout_variant=~\"$variant\",payment_method_system_name=~\"$paymentMethod\"})) > bool 0)), 0.000001)",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "pluginVersion": "11.0.0"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "nopcommerce",
+    "checkout",
+    "observability"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(checkout_outcomes_total, checkout_variant)",
+        "includeAll": true,
+        "label": "Checkout Variant",
+        "multi": false,
+        "name": "variant",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(checkout_outcomes_total, checkout_variant)",
+          "refId": "Prometheus-variant"
+        },
+        "refresh": 2,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(checkout_outcomes_total, payment_method_system_name)",
+        "includeAll": true,
+        "label": "Payment Method",
+        "multi": false,
+        "name": "paymentMethod",
+        "options": [],
+        "query": {
+          "qryType": 1,
+          "query": "label_values(checkout_outcomes_total, payment_method_system_name)",
+          "refId": "Prometheus-paymentMethod"
+        },
+        "refresh": 2,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Customer Places an Order",
+  "uid": "nop-order-flow",
+  "version": 1,
+  "weekStart": ""
+}

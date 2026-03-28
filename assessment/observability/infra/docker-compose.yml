@@ -1,0 +1,88 @@
+services:
+  nopcommerce_web:
+    build: .
+    container_name: nopcommerce
+    ports:
+      - "80:80"
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      FAULT_INJECTION_ENABLED: ${FAULT_INJECTION_ENABLED:-false}
+      FAULT_INJECTION_FAIL_STAGE: ${FAULT_INJECTION_FAIL_STAGE:-}
+      FAULT_INJECTION_FAIL_PERCENT: ${FAULT_INJECTION_FAIL_PERCENT:-0}
+      FAULT_INJECTION_DELAY_STAGE: ${FAULT_INJECTION_DELAY_STAGE:-}
+      FAULT_INJECTION_DELAY_PERCENT: ${FAULT_INJECTION_DELAY_PERCENT:-0}
+      FAULT_INJECTION_DELAY_MS: ${FAULT_INJECTION_DELAY_MS:-0}
+    depends_on:
+      - nopcommerce_database
+      - otel-collector
+    volumes:
+      - nopcommerce_appdata:/app/App_Data
+
+  nopcommerce_database:
+    image: mcr.microsoft.com/mssql/server:2019-latest
+    container_name: nopcommerce_mssql_server
+    environment:
+      SA_PASSWORD: "nopCommerce_db_password"
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: "Express"
+    volumes:
+      - nopcommerce_dbdata:/var/opt/mssql
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: nopcommerce_otel_collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "9464:9464"
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: nopcommerce_jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: nopcommerce_prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: nopcommerce_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./observability/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./observability/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - jaeger
+
+volumes:
+  nopcommerce_appdata:
+  nopcommerce_dbdata:
+  prometheus_data:
+  grafana_data:
