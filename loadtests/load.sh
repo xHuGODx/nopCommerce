@@ -10,8 +10,8 @@ docker run --rm --network host \
   -e BASE_URL=http://localhost \
   -e PRODUCT_PATH=/htc-smartphone \
   -e PAYMENT_METHOD=Payments.CheckMoneyOrder \
-  -e VUS=5 \
-  -e ITERATIONS=10 \
-  -e PAUSE_SECONDS=4 \
-  -e MAX_DURATION=15m \
+  -e VUS=3 \
+  -e ITERATIONS=30 \
+  -e PAUSE_SECONDS=20 \
+  -e MAX_DURATION=25m \
   "$@"
