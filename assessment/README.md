@@ -18,9 +18,4 @@ This folder groups the supporting material referenced by the delivery documentat
 
 ## Note
 
-The original assignment suggestion mentioned a separate `evidence` folder. In this repository, the practical evidence is already distributed across:
-
-- [dashboards/screenshots](./dashboards/screenshots)
-- [load-test](./load-test)
-- [observability](./observability)
-
+The original assignment suggestion mentioned a separate `evidence` folder. In this repository, the practical evidence is already distributed across the other folders.
